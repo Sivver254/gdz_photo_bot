@@ -1,21 +1,20 @@
 # app/handlers/photo.py
-from datetime import datetime
 from io import BytesIO
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from aiogram import Router, F
 from aiogram.types import (
     Message,
-    PhotoSize,
     CallbackQuery,
     BufferedInputFile,
+    PhotoSize,
 )
 from sqlalchemy import select
 
 from app.config import settings
-from app.db.models import Task
 from app.db.session import get_session
-from app.keyboards import inline_task_text_keyboard
+from app.db.models import Task
 from app.services.ai_client import call_openai_vision
 from app.services.image_renderer import render_solution_image
 from app.services.limits import (
@@ -23,6 +22,7 @@ from app.services.limits import (
     check_and_increment_daily_usage,
     DailyLimitExceeded,
 )
+from app.keyboards import inline_task_text_keyboard
 
 router = Router()
 
@@ -38,103 +38,112 @@ async def start_solve(callback: CallbackQuery):
 
 @router.message(F.photo)
 async def handle_photo(message: Message):
-    """Основной обработчик фото."""
+    """Обработчик фото: качаем, шлём в OpenAI, рендерим решение."""
 
     if not message.from_user:
         return
 
-    moscow_now = datetime.now(ZoneInfo(settings.moscow_tz))
+    # Статус-сообщение, чтобы пользователь видел, что что-то происходит
+    status = await message.answer("Фотку получил, думаю… 🤔")
 
-    # 1. Регистрируем / находим пользователя и проверяем дневной лимит
+    now_msk = datetime.now(ZoneInfo(settings.moscow_tz))
+
+    # ===== 1. Пользователь + лимит =====
     async with get_session() as session:
         user = await get_or_create_user(
             session=session,
             tg_user_id=message.from_user.id,
             username=message.from_user.username,
-            now_moscow=moscow_now,
+            now_moscow=now_msk,
         )
 
         try:
             await check_and_increment_daily_usage(
                 session=session,
                 user=user,
-                now_moscow=moscow_now,
+                now_moscow=now_msk,
                 daily_limit=settings.daily_limit,
             )
         except DailyLimitExceeded:
-            await message.answer(
-                "Лимит на день исчерпан, дабы поддерживать функционал бота "
-                "и избегать ошибок ❗\nПриходите через 12 часов⏳"
+            await status.edit_text(
+                "❌ Лимит на день исчерпан, дабы поддерживать функционал бота "
+                "и избегать ошибок.\nПриходите через 12 часов ⏳"
             )
             return
 
-    # 2. Берём самое большое фото и качаем его в память
-    largest_photo: PhotoSize = message.photo[-1]
+    # ===== 2. Качаем фото =====
+    try:
+        buf = BytesIO()
+        largest: PhotoSize = message.photo[-1]  # самое большое
+        await message.bot.download(largest, buf)
+        image_bytes = buf.getvalue()
+    except Exception as e:
+        await status.edit_text("❌ Не смог скачать фото. Попробуй ещё раз.")
+        print("DOWNLOAD ERROR:", repr(e))
+        return
 
-    buf = BytesIO()
-    await message.bot.download(largest_photo, buf)
-    image_bytes = buf.getvalue()
-
-    # 3. Статус-сообщения
-    status = await message.answer("Анализирую фотографию📈")
+    # ===== 3. Зовём OpenAI =====
+    await status.edit_text("Анализирую изображение 📊…")
 
     try:
-        # 4. Обращаемся к OpenAI (vision)
-        answer_text = await call_openai_vision(
+        answer = await call_openai_vision(
             image_bytes=image_bytes,
             caption=message.caption,
             is_premium=user.is_premium,
         )
-
-        await status.edit_text("Создаю решение🎉")
-        await status.edit_text("Пишу результат ⏳")
-
-        # 5. Рендерим картинку с решением
-        image_answer_bytes = render_solution_image(answer_text)
-        input_file = BufferedInputFile(
-            image_answer_bytes,
-            filename="solution.png",
+    except RuntimeError as e:
+        # Наши осознанные OPENAI_* ошибки
+        await status.edit_text(
+            "❌ Ошибка при работе с OpenAI.\n"
+            f"{e}\n\n"
+            "Это проблема конфигурации (ключ/модель/лимиты). "
+            "После исправления всё заработает."
         )
-
-        # 6. Сохраняем задачу в БД
-        async with get_session() as session:
-            task = Task(
-                user_id=user.id,
-                created_at=moscow_now,
-                is_premium=user.is_premium,
-                telegram_file_id=largest_photo.file_id,
-                answer_text=answer_text,
-            )
-            session.add(task)
-            await session.commit()
-            await session.refresh(task)
-            task_id = task.id
-
-        # 7. Отправляем результат
-        try:
-            await status.delete()
-        except Exception:
-            pass
-
-        await message.answer_photo(
-            photo=input_file,
-            caption="Готово✅",
-            reply_markup=inline_task_text_keyboard(task_id),
-        )
-
+        print("VISION ERROR:", repr(e))
+        return
     except Exception as e:
-        # ЛЮБАЯ ошибка здесь не должна валить бота
-        try:
-            await status.edit_text(
-                "Произошла ошибка при обработке изображения. "
-                "Попробуйте ещё раз позже."
-            )
-        except Exception:
-            await message.answer(
-                "Произошла ошибка при обработке изображения. "
-                "Попробуйте ещё раз позже."
-            )
-        print("Error in handle_photo:", repr(e))
+        await status.edit_text(
+            "❌ Неизвестная ошибка при анализе фото. Попробуй позже."
+        )
+        print("VISION UNKNOWN ERROR:", repr(e))
+        return
+
+    # ===== 4. Рендерим картинку с решением =====
+    await status.edit_text("Создаю готовое решение 🧠🖼")
+
+    try:
+        result_image = render_solution_image(answer)
+        file = BufferedInputFile(result_image, filename="solution.png")
+    except Exception as e:
+        await status.edit_text("❌ Ошибка при рендере изображения.")
+        print("RENDER ERROR:", repr(e))
+        return
+
+    # ===== 5. Сохраняем задачу в БД =====
+    async with get_session() as session:
+        task = Task(
+            user_id=user.id,
+            created_at=now_msk,
+            is_premium=user.is_premium,
+            telegram_file_id=largest.file_id,
+            answer_text=answer,
+        )
+        session.add(task)
+        await session.commit()
+        await session.refresh(task)
+        task_id = task.id
+
+    # ===== 6. Отправляем результат =====
+    try:
+        await status.delete()
+    except Exception:
+        pass
+
+    await message.answer_photo(
+        photo=file,
+        caption="Готово!👇",
+        reply_markup=inline_task_text_keyboard(task_id),
+    )
 
 
 @router.callback_query(F.data.startswith("task_text:"))
