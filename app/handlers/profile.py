@@ -4,23 +4,21 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Router, F
 from aiogram.types import CallbackQuery
-from sqlalchemy import select
 
 from app.config import settings
-from app.db.models import User
 from app.db.session import get_session
 from app.services.limits import get_or_create_user
 
 router = Router()
 
 
-@router.callback_query(F.data == "menu_profile")
+@router.callback_query(F.data == "profile")
 async def menu_profile(callback: CallbackQuery):
     """
     Показывает профиль пользователя:
-    - дата регистрации (берётся из БД, не меняется)
+    - дата регистрации в МСК
     - статус премиума
-    Если записи в БД почему-то нет — создаём её на лету.
+    Если пользователя нет в БД — создаём запись.
     """
     if not callback.from_user:
         await callback.answer()
@@ -28,8 +26,8 @@ async def menu_profile(callback: CallbackQuery):
 
     now_moscow = datetime.now(ZoneInfo(settings.moscow_tz))
 
+    # Гарантированно получаем пользователя
     async with get_session() as session:
-        # Гарантированно получаем пользователя (создаём, если не было)
         user = await get_or_create_user(
             session=session,
             tg_user_id=callback.from_user.id,
@@ -37,13 +35,11 @@ async def menu_profile(callback: CallbackQuery):
             now_moscow=now_moscow,
         )
 
-    # first_seen_at может быть с таймзоной или без — аккуратно форматируем
     first_seen = user.first_seen_at
     try:
         if first_seen.tzinfo is not None:
             first_seen = first_seen.astimezone(ZoneInfo(settings.moscow_tz))
     except Exception:
-        # Если вдруг БД вернула кривую дату — просто оставляем как есть
         pass
 
     first_seen_str = first_seen.strftime("%d.%m.%Y %H:%M")
