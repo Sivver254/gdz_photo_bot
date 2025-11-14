@@ -2,9 +2,8 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from aiogram import Router
-from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram import Router, F
+from aiogram.types import CallbackQuery
 from sqlalchemy import select
 
 from app.config import settings
@@ -15,29 +14,45 @@ from app.services.limits import get_or_create_user
 router = Router()
 
 
-@router.message(Command("profile"))
-async def cmd_profile(message: Message):
-    async with await get_session() as session:
-        stmt = select(User).where(User.telegram_user_id == message.from_user.id)
-        result = await session.execute(stmt)
-        user = result.scalar_one_or_none()
+@router.callback_query(F.data == "menu_profile")
+async def menu_profile(callback: CallbackQuery):
+    """
+    Показывает профиль пользователя:
+    - дата регистрации (берётся из БД, не меняется)
+    - статус премиума
+    Если записи в БД почему-то нет — создаём её на лету.
+    """
+    if not callback.from_user:
+        await callback.answer()
+        return
 
-    if not user:
-        moscow_now = datetime.now(ZoneInfo(settings.moscow_tz))
-        async with await get_session() as session:
-            user = await get_or_create_user(
-                session,
-                tg_user_id=message.from_user.id,
-                username=message.from_user.username,
-                now_moscow=moscow_now,
-            )
+    now_moscow = datetime.now(ZoneInfo(settings.moscow_tz))
 
-    moscow_tz = ZoneInfo(settings.moscow_tz)
-    first_seen_msk = user.first_seen_at.astimezone(moscow_tz)
-    date_str = first_seen_msk.strftime("%d.%m.%Y %H:%M")
+    async with get_session() as session:
+        # Гарантированно получаем пользователя (создаём, если не было)
+        user = await get_or_create_user(
+            session=session,
+            tg_user_id=callback.from_user.id,
+            username=callback.from_user.username,
+            now_moscow=now_moscow,
+        )
 
-    premium_line = "Премиум: активен✅" if user.is_premium else "Премиум: отсутствует❌"
+    # first_seen_at может быть с таймзоной или без — аккуратно форматируем
+    first_seen = user.first_seen_at
+    try:
+        if first_seen.tzinfo is not None:
+            first_seen = first_seen.astimezone(ZoneInfo(settings.moscow_tz))
+    except Exception:
+        # Если вдруг БД вернула кривую дату — просто оставляем как есть
+        pass
 
-    text = f"Дата регистрации: {date_str} (по МСК)\n{premium_line}"
+    first_seen_str = first_seen.strftime("%d.%m.%Y %H:%M")
+    premium_status = "активен✅" if user.is_premium else "отсутствует❌"
 
-    await message.answer(text)
+    text = (
+        f"Дата регистрации: {first_seen_str} (по МСК)\n"
+        f"Премиум: {premium_status}"
+    )
+
+    await callback.message.answer(text)
+    await callback.answer()
