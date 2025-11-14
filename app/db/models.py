@@ -21,14 +21,13 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True)
-    telegram_user_id = Column(BigInteger, unique=True, nullable=False, index=True)
+    telegram_user_id = Column(BigInteger, unique=True, index=True, nullable=False)
     username = Column(String(255), nullable=True)
     first_seen_at = Column(DateTime(timezone=True), nullable=False)
     is_premium = Column(Boolean, default=False, nullable=False)
     premium_since = Column(DateTime(timezone=True), nullable=True)
 
-    usages = relationship("DailyUsage", back_populates="user", cascade="all, delete-orphan")
-    tasks = relationship("Task", back_populates="user", cascade="all, delete-orphan")
+    tasks = relationship("Task", back_populates="user")
 
 
 class DailyUsage(Base):
@@ -39,17 +38,15 @@ class DailyUsage(Base):
     date = Column(Date, nullable=False, index=True)
     used_requests = Column(Integer, nullable=False, default=0)
 
-    user = relationship("User", back_populates="usages")
-
 
 class Task(Base):
     __tablename__ = "tasks"
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
-    is_premium = Column(Boolean, default=False, nullable=False)
-    photo_file_id = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    is_premium = Column(Boolean, nullable=False, default=False)
+    telegram_file_id = Column(String(255), nullable=True)
     answer_text = Column(Text, nullable=False)
 
     user = relationship("User", back_populates="tasks")
