@@ -1,74 +1,79 @@
 # app/services/image_renderer.py
+from __future__ import annotations
+
 from io import BytesIO
-import textwrap
+from textwrap import wrap
 
 from PIL import Image, ImageDraw, ImageFont
 
 
-def render_text_to_image(answer_text: str) -> bytes:
-    """
-    Рендерит текст решения в PNG-картинку
-    """
-    width = 1200
-    padding = 80
-    background_color = (15, 15, 15)
-    text_color = (240, 240, 240)
-    heading_color = (255, 255, 255)
+IMAGE_WIDTH = 1200
+PADDING = 60
+BG_COLOR = (15, 15, 15)       # тёмный фон
+TEXT_COLOR = (240, 240, 240)  # почти белый текст
+FONT_SIZE = 42
+MAX_CHARS_PER_LINE = 60       # примерная ширина строки
 
-    title = "Результат\n(ГДЗ по фото)"
-    wrapped_answer = _wrap_text(answer_text, max_chars=70)
 
+def _get_font() -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """
+    Пытаемся взять нормальный TTF-шрифт.
+    Если на сервере его нет – берём дефолтный.
+    """
     try:
-        font_title = ImageFont.truetype("arial.ttf", 40)
-        font_text = ImageFont.truetype("arial.ttf", 30)
-    except OSError:
-        font_title = ImageFont.load_default()
-        font_text = ImageFont.load_default()
-
-    temp_img = Image.new("RGB", (width, 1000), background_color)
-    draw = ImageDraw.Draw(temp_img)
-
-    title_bbox = draw.multiline_textbbox((0, 0), title, font=font_title, align="center")
-    answer_bbox = draw.multiline_textbbox((0, 0), wrapped_answer, font=font_text)
-
-    height = (
-        padding * 2
-        + (title_bbox[3] - title_bbox[1])
-        + 40
-        + (answer_bbox[3] - answer_bbox[1])
-    )
-
-    img = Image.new("RGB", (width, height), background_color)
-    draw = ImageDraw.Draw(img)
-
-    current_y = padding
-    title_width = title_bbox[2] - title_bbox[0]
-    title_x = (width - title_width) // 2
-    draw.multiline_text((title_x, current_y), title, font=font_title, fill=heading_color, align="center")
-
-    current_y += (title_bbox[3] - title_bbox[1]) + 40
-
-    draw.multiline_text(
-        (padding, current_y),
-        wrapped_answer,
-        font=font_text,
-        fill=text_color,
-        align="left",
-        spacing=8,
-    )
-
-    output = BytesIO()
-    img.save(output, format="PNG")
-    output.seek(0)
-    return output.read()
+        return ImageFont.truetype("DejaVuSans.ttf", FONT_SIZE)
+    except Exception:
+        return ImageFont.load_default()
 
 
-def _wrap_text(text: str, max_chars: int = 70) -> str:
-    lines = []
+def _prepare_lines(text: str) -> list[str]:
+    """Разбиваем текст на аккуратные строки."""
+    font = _get_font()
+    lines: list[str] = []
+
     for paragraph in text.split("\n"):
-        paragraph = paragraph.strip()
+        paragraph = paragraph.rstrip()
         if not paragraph:
             lines.append("")
             continue
-        lines.extend(textwrap.wrap(paragraph, width=max_chars))
-    return "\n".join(lines)
+        wrapped = wrap(paragraph, width=MAX_CHARS_PER_LINE)
+        if not wrapped:
+            lines.append("")
+        else:
+            lines.extend(wrapped)
+
+    if not lines:
+        lines = ["(пусто)"]
+
+    return lines, font
+
+
+def render_solution_image(text: str) -> bytes:
+    """
+    Рендерит текст решения в PNG-картинку и возвращает байты.
+    Именно ЭТУ функцию импортирует handler фото.
+    """
+    lines, font = _prepare_lines(text)
+
+    # высота строки
+    bbox = font.getbbox("Ay")
+    line_height = bbox[3] - bbox[1] + 8
+
+    img_height = PADDING * 2 + line_height * len(lines)
+
+    img = Image.new("RGB", (IMAGE_WIDTH, img_height), BG_COLOR)
+    draw = ImageDraw.Draw(img)
+
+    y = PADDING
+    for line in lines:
+        draw.text((PADDING, y), line, font=font, fill=TEXT_COLOR)
+        y += line_height
+
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+# На всякий случай алиас – если где-то будешь импортить другое имя
+def render_text_to_image(text: str) -> bytes:
+    return render_solution_image(text)
