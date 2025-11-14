@@ -2,8 +2,7 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from aiogram import Router
-from aiogram.filters import CommandStart
+from aiogram import Router, F
 from aiogram.types import Message
 
 from app.config import settings
@@ -14,21 +13,22 @@ from app.keyboards import inline_start_keyboard, reply_main_keyboard
 router = Router()
 
 
-@router.message(CommandStart())
-async def cmd_start(message: Message) -> None:
-    moscow_now = datetime.now(ZoneInfo(settings.moscow_tz))
+@router.message(F.text == "/start")
+async def cmd_start(message: Message):
+    if not message.from_user:
+        return
 
-    async with await get_session() as session:
-        await get_or_create_user(
+    now_moscow = datetime.now(ZoneInfo(settings.moscow_tz))
+
+    async with get_session() as session:
+        user = await get_or_create_user(
             session=session,
             tg_user_id=message.from_user.id,
             username=message.from_user.username,
-            now_moscow=moscow_now,
+            now_moscow=now_moscow,
         )
 
-    is_admin = message.from_user.id == settings.admin_id
-
-    text = "Привет, друг👋 Хочешь списать? Тогда я вам помогу 🔥 (By iluxa)"
+    text = 'Привет, друг👋 Хочешь списать? Тогда я вам помогу 🔥 (By iluxa)'
 
     await message.answer(
         text,
@@ -36,6 +36,8 @@ async def cmd_start(message: Message) -> None:
     )
 
     await message.answer(
-        "Кнопка главного меню всегда доступна ниже 👇",
-        reply_markup=reply_main_keyboard(is_admin=is_admin),
+        "Главное меню всегда доступно на клавиатуре снизу.",
+        reply_markup=reply_main_keyboard(
+            is_admin=(message.from_user.id == settings.admin_id)
+        ),
     )
