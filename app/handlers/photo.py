@@ -38,19 +38,14 @@ async def start_solve(callback: CallbackQuery):
 
 @router.message(F.photo)
 async def handle_photo(message: Message):
-    """
-    Основной обработчик фото.
-    Тут были две проблемы:
-    1) в aiogram 3 у PhotoSize нет .download()
-    2) answer_photo нужно отдавать InputFile, а не просто bytes
-    Обе исправлены в этом варианте.
-    """
+    """Основной обработчик фото."""
+
     if not message.from_user:
         return
 
     moscow_now = datetime.now(ZoneInfo(settings.moscow_tz))
 
-    # 1. Регистрируем/находим пользователя и проверяем лимит
+    # 1. Регистрируем / находим пользователя и проверяем дневной лимит
     async with get_session() as session:
         user = await get_or_create_user(
             session=session,
@@ -73,19 +68,18 @@ async def handle_photo(message: Message):
             )
             return
 
-    # 2. Скачиваем фото корректным способом для aiogram 3
+    # 2. Берём самое большое фото и качаем его в память
     largest_photo: PhotoSize = message.photo[-1]
 
     buf = BytesIO()
-    # В aiogram 3 скачиваем через bot.download(), а не через photo.download()
     await message.bot.download(largest_photo, buf)
     image_bytes = buf.getvalue()
 
-    # 3. Статус-сообщение
+    # 3. Статус-сообщения
     status = await message.answer("Анализирую фотографию📈")
 
     try:
-        # 4. Вызываем OpenAI
+        # 4. Обращаемся к OpenAI (vision)
         answer_text = await call_openai_vision(
             image_bytes=image_bytes,
             caption=message.caption,
@@ -129,7 +123,7 @@ async def handle_photo(message: Message):
         )
 
     except Exception as e:
-        # Любая ошибка при обработке фото – пишем юзеру, лог не гробим
+        # ЛЮБАЯ ошибка здесь не должна валить бота
         try:
             await status.edit_text(
                 "Произошла ошибка при обработке изображения. "
@@ -145,6 +139,7 @@ async def handle_photo(message: Message):
 
 @router.callback_query(F.data.startswith("task_text:"))
 async def task_text(callback: CallbackQuery):
+    """Отдаём текстовое решение по нажатию кнопки под картинкой."""
     _, task_id_str = callback.data.split(":", 1)
     try:
         task_id = int(task_id_str)
