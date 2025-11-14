@@ -4,7 +4,12 @@ from io import BytesIO
 from zoneinfo import ZoneInfo
 
 from aiogram import Router, F
-from aiogram.types import Message, PhotoSize, CallbackQuery
+from aiogram.types import (
+    Message,
+    PhotoSize,
+    CallbackQuery,
+    BufferedInputFile,
+)
 from sqlalchemy import select
 
 from app.config import settings
@@ -33,11 +38,19 @@ async def start_solve(callback: CallbackQuery):
 
 @router.message(F.photo)
 async def handle_photo(message: Message):
+    """
+    Основной обработчик фото.
+    Тут были две проблемы:
+    1) в aiogram 3 у PhotoSize нет .download()
+    2) answer_photo нужно отдавать InputFile, а не просто bytes
+    Обе исправлены в этом варианте.
+    """
     if not message.from_user:
         return
 
     moscow_now = datetime.now(ZoneInfo(settings.moscow_tz))
 
+    # 1. Регистрируем/находим пользователя и проверяем лимит
     async with get_session() as session:
         user = await get_or_create_user(
             session=session,
@@ -60,14 +73,19 @@ async def handle_photo(message: Message):
             )
             return
 
+    # 2. Скачиваем фото корректным способом для aiogram 3
     largest_photo: PhotoSize = message.photo[-1]
+
     buf = BytesIO()
-    await largest_photo.download(destination=buf)
+    # В aiogram 3 скачиваем через bot.download(), а не через photo.download()
+    await message.bot.download(largest_photo, buf)
     image_bytes = buf.getvalue()
 
+    # 3. Статус-сообщение
     status = await message.answer("Анализирую фотографию📈")
 
     try:
+        # 4. Вызываем OpenAI
         answer_text = await call_openai_vision(
             image_bytes=image_bytes,
             caption=message.caption,
@@ -77,8 +95,14 @@ async def handle_photo(message: Message):
         await status.edit_text("Создаю решение🎉")
         await status.edit_text("Пишу результат ⏳")
 
+        # 5. Рендерим картинку с решением
         image_answer_bytes = render_solution_image(answer_text)
+        input_file = BufferedInputFile(
+            image_answer_bytes,
+            filename="solution.png",
+        )
 
+        # 6. Сохраняем задачу в БД
         async with get_session() as session:
             task = Task(
                 user_id=user.id,
@@ -92,14 +116,20 @@ async def handle_photo(message: Message):
             await session.refresh(task)
             task_id = task.id
 
-        await status.delete()
+        # 7. Отправляем результат
+        try:
+            await status.delete()
+        except Exception:
+            pass
+
         await message.answer_photo(
-            photo=image_answer_bytes,
+            photo=input_file,
             caption="Готово✅",
             reply_markup=inline_task_text_keyboard(task_id),
         )
 
     except Exception as e:
+        # Любая ошибка при обработке фото – пишем юзеру, лог не гробим
         try:
             await status.edit_text(
                 "Произошла ошибка при обработке изображения. "
