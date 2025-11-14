@@ -13,20 +13,19 @@ from aiogram.webhook.aiohttp_server import (
 from app.config import settings
 from app.db.session import init_db
 from app.handlers import start, menu, photo, profile, admin
+from app.keyboards import reply_main_keyboard
 
 
 async def on_startup(app: web.Application):
-    # создаём таблицы в БД
     await init_db()
 
     bot: Bot = app["bot"]
 
     if not settings.webhook_base_url:
-        print("WARNING: WEBHOOK_BASE_URL is not set. Webhook will not be configured.")
+        print("WARNING: WEBHOOK_BASE_URL is not set")
         return
 
     webhook_url = settings.webhook_base_url.rstrip("/") + settings.webhook_path
-
     await bot.set_webhook(
         url=webhook_url,
         drop_pending_updates=True,
@@ -62,26 +61,19 @@ def main():
     app["bot"] = bot
     app["dispatcher"] = dp
 
-    # регистрируем обработчик webhook'а
     SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
-    ).register(
-        app,
-        path=settings.webhook_path,
-    )
+    ).register(app, path=settings.webhook_path)
 
-    # healthcheck
     app.router.add_get("/", healthcheck)
 
-    # интеграция aiogram + aiohttp
     setup_application(app, dp, bot=bot)
 
-    # хуки старта/остановки
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
 
-    port = int(os.getenv("PORT", "8080"))
+    port = int(os.getenv("PORT", "10000"))
     web.run_app(app, host="0.0.0.0", port=port)
 
 
