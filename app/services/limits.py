@@ -1,13 +1,14 @@
 # app/services/limits.py
-from __future__ import annotations
-
-from datetime import datetime
-from typing import Tuple
+from datetime import datetime, date
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import User, DailyUsage
+
+
+class DailyLimitExceeded(Exception):
+    pass
 
 
 async def get_or_create_user(
@@ -20,42 +21,39 @@ async def get_or_create_user(
     result = await session.execute(stmt)
     user = result.scalar_one_or_none()
 
-    if user:
-        if username and user.username != username:
-            user.username = username
-            await session.commit()
-        return user
+    if user is None:
+        user = User(
+            telegram_user_id=tg_user_id,
+            username=username,
+            first_seen_at=now_moscow,
+            is_premium=False,
+            premium_since=None,
+        )
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
 
-    user = User(
-        telegram_user_id=tg_user_id,
-        username=username,
-        first_seen_at=now_moscow,
-        is_premium=False,
-        premium_since=None,
-    )
-    session.add(user)
-    await session.commit()
-    await session.refresh(user)
     return user
 
 
-async def check_and_increment_daily_limit(
+async def check_and_increment_daily_usage(
     session: AsyncSession,
     user: User,
     now_moscow: datetime,
     daily_limit: int,
-) -> Tuple[bool, int]:
-    """
-    True -> запрос разрешён, счётчик увеличен.
-    False -> лимит превышен, счётчик не меняем.
-    """
+) -> None:
+    """Кидает DailyLimitExceeded, если превышен лимит для НЕ премиумов."""
     if user.is_premium:
-        return True, -1  # -1 как маркер "без лимита"
+        return
 
-    current_date = now_moscow.date()
+    today = date(
+        year=now_moscow.year,
+        month=now_moscow.month,
+        day=now_moscow.day,
+    )
     stmt = select(DailyUsage).where(
         DailyUsage.user_id == user.id,
-        DailyUsage.date == current_date,
+        DailyUsage.date == today,
     )
     result = await session.execute(stmt)
     usage = result.scalar_one_or_none()
@@ -63,16 +61,15 @@ async def check_and_increment_daily_limit(
     if usage is None:
         usage = DailyUsage(
             user_id=user.id,
-            date=current_date,
-            used_requests=1,
+            date=today,
+            used_requests=0,
         )
         session.add(usage)
         await session.commit()
-        return True, usage.used_requests
+        await session.refresh(usage)
 
     if usage.used_requests >= daily_limit:
-        return False, usage.used_requests
+        raise DailyLimitExceeded()
 
     usage.used_requests += 1
     await session.commit()
-    return True, usage.used_requests
