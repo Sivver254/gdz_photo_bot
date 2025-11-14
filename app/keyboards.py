@@ -39,7 +39,7 @@ def inline_main_menu_keyboard() -> InlineKeyboardMarkup:
             ],
             [InlineKeyboardButton(text="Правила", callback_data="menu_rules")],
             [InlineKeyboardButton(text="Премиум✨", callback_data="menu_premium")],
-            [InlineKeyboardButton(text="Мой профиль👤", callback_data="menu_profile")],
+            [InlineKeyboardButton(text="Мой профиль👤", callback_data="profile")],
         ]
     )
 
