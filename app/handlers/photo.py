@@ -1,132 +1,148 @@
 # app/handlers/photo.py
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from __future__ import annotations
+
 from io import BytesIO
+from datetime import datetime
 
 from aiogram import Router, F
-from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message, PhotoSize
-from sqlalchemy import select
+from aiogram.types import Message, BufferedInputFile
 
 from app.config import settings
 from app.db.models import User, Task
-from app.db.session import get_session
+from app.db.session import async_session_maker
 from app.keyboards import inline_task_text_keyboard
 from app.services.ai_client import call_openai_vision
-from app.services.image_renderer import render_text_to_image
-from app.services.limits import get_or_create_user, check_and_increment_daily_limit
+from app.services.image_renderer import render_solution_image
+from app.services.limits import DailyLimitExceeded, check_and_increment_daily_usage
 
-router = Router()
-
-
-class PhotoStates(StatesGroup):
-    waiting_for_photo = State()
+router = Router(name="photo")
 
 
-@router.callback_query(F.data == "start_solve")
-async def start_solve(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(PhotoStates.waiting_for_photo)
-    await callback.message.answer(
-        "Отправь мне фото задания и я его обязательно решу, за правильность ответа не отвечаю 🐒"
-    )
-    await callback.answer()
+async def _get_or_create_user(telegram_user_id: int, username: str | None) -> User:
+    """Достаём пользователя из БД или создаём нового."""
+    async with async_session_maker() as session:
+        user = await session.get(User, {"telegram_user_id": telegram_user_id})
+        if user is None:
+            user = User(
+                telegram_user_id=telegram_user_id,
+                username=username,
+                first_seen_at=datetime.now(settings.tz),
+                is_premium=False,
+                premium_since=None,
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+    return user
 
 
-@router.message(PhotoStates.waiting_for_photo, F.photo)
-async def handle_photo(message: Message, state: FSMContext):
-    moscow_now = datetime.now(ZoneInfo(settings.moscow_tz))
-
-    async with await get_session() as session:
-        user = await get_or_create_user(
-            session=session,
-            tg_user_id=message.from_user.id,
-            username=message.from_user.username,
-            now_moscow=moscow_now,
-        )
-
-        allowed, used = await check_and_increment_daily_limit(
-            session=session,
-            user=user,
-            now_moscow=moscow_now,
-            daily_limit=settings.daily_limit,
-        )
-
-    if not allowed:
-        await message.answer(
-            "Лимит на день исчерпан, дабы поддерживать функционал бота и избегать ошибок ❗\n"
-            "Приходите через 12 часов⏳"
-        )
+@router.message(F.photo)
+async def handle_photo(message: Message, state: FSMContext) -> None:
+    """
+    Обрабатываем ЛЮБОЕ фото, без привязки к состоянию.
+    Так у тебя не будет ситуации, когда бот молчит.
+    """
+    if not message.from_user:
         return
 
-    largest_photo: PhotoSize = message.photo[-1]
+    user_tg_id = message.from_user.id
+    username = message.from_user.username
 
-    buffer = BytesIO()
-    await largest_photo.download(destination=buffer)
-    image_bytes = buffer.getvalue()
+    # 1. Достаём/создаём пользователя
+    user = await _get_or_create_user(user_tg_id, username)
 
-    status = await message.answer("Анализирую фотографию📈")
+    # 2. Проверяем лимиты (для премиума лимитов нет)
+    async with async_session_maker() as session:
+        try:
+            await check_and_increment_daily_usage(session, user)
+        except DailyLimitExceeded:
+            await message.answer(
+                "Лимит на день исчерпан, дабы поддерживать функционал бота и избегать ошибок ❗\n"
+                "Приходите через 12 часов⏳"
+            )
+            return
+
+    # 3. Сообщение-статус
+    status_msg = await message.answer("Анализирую фотографию📈")
 
     try:
-        answer_text = await call_openai_vision(
+        # 4. Скачиваем фото как байты
+        largest_photo = message.photo[-1]
+        buf = BytesIO()
+        await message.bot.download(largest_photo, buf)
+        image_bytes = buf.getvalue()
+
+        # 5. Подготовка промпта для ИИ
+        user_caption = message.caption or ""
+        user_prompt = (
+            "Ты — гуру образования России. Тебе прислали фото задания.\n"
+            "Аккуратно распознай текст (включая рукописный), пойми, что нужно сделать, "
+            "реши задание и оформи понятный ответ для школьника/студента.\n"
+            "Если есть подпись к фото (например: 'реши только 1 и 3 номер'), учитывай её строго.\n"
+            "Дай готовое решение без лишней воды.\n\n"
+            f"Подпись пользователя к фото: {user_caption}"
+        )
+
+        # 6. Обновляем статус
+        await status_msg.edit_text("Создаю решение🎉")
+
+        # 7. Вызываем OpenAI (vision)
+        solution_text = await call_openai_vision(
             image_bytes=image_bytes,
-            caption=message.caption,
+            user_prompt=user_prompt,
             is_premium=user.is_premium,
         )
 
-        await status.edit_text("Создаю решение🎉")
-        await status.edit_text("Пишу результат ⏳")
+        # 8. Ещё раз статус
+        await status_msg.edit_text("Пишу результат ⏳")
 
-        img_bytes = render_text_to_image(answer_text)
+        # 9. Рендерим картинку с ответом
+        solution_image_bytes = await render_solution_image(solution_text)
 
-        async with await get_session() as session:
+        # 10. Сохраняем задачу в БД
+        async with async_session_maker() as session:
             task = Task(
                 user_id=user.id,
+                created_at=datetime.now(settings.tz),
                 is_premium=user.is_premium,
-                photo_file_id=largest_photo.file_id,
-                answer_text=answer_text,
+                telegram_file_id="",  # заполним после отправки фото
+                answer_text=solution_text,
             )
             session.add(task)
             await session.commit()
             await session.refresh(task)
-            task_id = task.id
 
-        await status.delete()
+        # 11. Отправляем фото-ответ
+        photo_file = BufferedInputFile(solution_image_bytes, filename="solution.png")
+        await status_msg.delete()
 
-        await message.answer("Готово✅")
-
-        await message.answer_photo(
-            photo=img_bytes,
-            caption="Вот твоё решение 👆",
-            reply_markup=inline_task_text_keyboard(task_id),
+        sent_photo_msg = await message.answer_photo(
+            photo=photo_file,
+            caption="Готово✅",
+            reply_markup=inline_task_text_keyboard(task.id),
         )
 
-    except Exception:
+        # 12. Обновляем file_id в БД
+        if sent_photo_msg.photo:
+            new_file_id = sent_photo_msg.photo[-1].file_id
+            async with async_session_maker() as session:
+                db_task = await session.get(Task, task.id)
+                if db_task:
+                    db_task.telegram_file_id = new_file_id
+                    await session.commit()
+
+    except Exception as e:
+        # На всякий случай ловим любые сбои, чтобы не было тишины
         try:
-            await status.edit_text(
-                "Произошла ошибка при обработке изображения. Попробуйте ещё раз чуть позже."
+            await status_msg.edit_text(
+                "Произошла ошибка при обработке изображения 😔\n"
+                "Попробуйте ещё раз позже или отправьте другое фото."
             )
         except Exception:
-            pass
-
-
-@router.callback_query(F.data.startswith("task_text:"))
-async def task_text(callback: CallbackQuery):
-    _, task_id_str = callback.data.split(":", 1)
-    try:
-        task_id = int(task_id_str)
-    except ValueError:
-        await callback.answer("Ошибка ID задачи", show_alert=True)
-        return
-
-    async with await get_session() as session:
-        stmt = select(Task).where(Task.id == task_id)
-        result = await session.execute(stmt)
-        task = result.scalar_one_or_none()
-
-    if not task:
-        await callback.answer("Не нашёл решение для этой задачи", show_alert=True)
-        return
-
-    await callback.message.answer(task.answer_text)
-    await callback.answer()
+            await message.answer(
+                "Произошла ошибка при обработке изображения 😔\n"
+                "Попробуйте ещё раз позже или отправьте другое фото."
+            )
+        # В логах Render ты увидишь подробную трассировку
+        print("Error while processing photo:", repr(e))
