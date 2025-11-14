@@ -27,7 +27,6 @@ def _is_admin(user_id: int) -> bool:
 
 @router.message(F.text == "Админ-Панель💎")
 async def admin_panel_entry(message: Message):
-    """Открытие админ-панели по кнопке в reply-клавиатуре."""
     if not _is_admin(message.from_user.id):
         await message.answer("У вас нет доступа к админ-панели❗")
         return
@@ -45,7 +44,9 @@ async def admin_give_premium(callback: CallbackQuery, state: FSMContext):
         return
 
     await state.set_state(AdminStates.waiting_user_id_give)
-    await callback.message.answer("Введите User ID пользователя, которому нужно выдать премиум:")
+    await callback.message.answer(
+        "Введите User ID пользователя, которому нужно выдать премиум:"
+    )
     await callback.answer()
 
 
@@ -56,7 +57,9 @@ async def admin_remove_premium(callback: CallbackQuery, state: FSMContext):
         return
 
     await state.set_state(AdminStates.waiting_user_id_remove)
-    await callback.message.answer("Введите User ID пользователя, у которого нужно снять премиум:")
+    await callback.message.answer(
+        "Введите User ID пользователя, у которого нужно снять премиум:"
+    )
     await callback.answer()
 
 
@@ -66,34 +69,32 @@ async def process_give_premium(message: Message, state: FSMContext):
         return
 
     try:
-        target_tg_id = int(message.text.strip())
-    except (TypeError, ValueError):
-        await message.answer("Нужно отправить только числовой User ID.")
+        target_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("Нужно отправить числовой User ID.")
         return
 
-    async with await get_session() as session:
-        stmt = select(User).where(User.telegram_user_id == target_tg_id)
+    async with get_session() as session:
+        stmt = select(User).where(User.telegram_user_id == target_id)
         result = await session.execute(stmt)
         user = result.scalar_one_or_none()
 
         if not user:
             await message.answer(
-                "Проблема с выдачей премиума: пользователь не найден в БД. "
-                "Возможно, он ещё не запускал бота❌"
+                "Проблема с выдачей премиума: пользователь не найден. "
+                "Пусть сначала запустит бота командой /start❌"
             )
         else:
             if not user.is_premium:
                 user.is_premium = True
                 user.premium_since = datetime.now(ZoneInfo(settings.moscow_tz))
                 await session.commit()
-            username_display = f"@{user.username}" if user.username else str(user.telegram_user_id)
-            await message.answer(
-                f"Успешно выдан премиум пользователю: {username_display}✅"
-            )
+            nick = f"@{user.username}" if user.username else str(user.telegram_user_id)
+            await message.answer(f"Успешно выдан премиум пользователю: {nick}✅")
 
     await state.clear()
     await message.answer(
-        "Возвращаю обычную клавиатуру.",
+        "Готово.",
         reply_markup=reply_main_keyboard(is_admin=True),
     )
 
@@ -104,32 +105,32 @@ async def process_remove_premium(message: Message, state: FSMContext):
         return
 
     try:
-        target_tg_id = int(message.text.strip())
-    except (TypeError, ValueError):
-        await message.answer("Нужно отправить только числовой User ID.")
+        target_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("Нужно отправить числовой User ID.")
         return
 
-    async with await get_session() as session:
-        stmt = select(User).where(User.telegram_user_id == target_tg_id)
+    async with get_session() as session:
+        stmt = select(User).where(User.telegram_user_id == target_id)
         result = await session.execute(stmt)
         user = result.scalar_one_or_none()
 
         if not user or not user.is_premium:
             await message.answer(
-                "Снятие не завершено. Возможно, пользователь не был зарегистрирован "
-                "в боте или у него не было премиума. Повторите попытку❌"
+                "Снятие не завершено. Возможно, пользователь не зарегистрирован "
+                "в боте или у него не было премиума❌"
             )
         else:
             user.is_premium = False
             user.premium_since = None
             await session.commit()
-            username_display = f"@{user.username}" if user.username else str(user.telegram_user_id)
+            nick = f"@{user.username}" if user.username else str(user.telegram_user_id)
             await message.answer(
-                f"Снятие премиума было успешно закончено✅\nПользователь: {username_display}"
+                f"Снятие премиума было успешно закончено✅\nПользователь: {nick}"
             )
 
     await state.clear()
     await message.answer(
-        "Возвращаю обычную клавиатуру.",
+        "Готово.",
         reply_markup=reply_main_keyboard(is_admin=True),
     )
