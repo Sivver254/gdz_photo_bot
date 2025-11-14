@@ -14,19 +14,15 @@ router = Router()
 
 @router.callback_query(F.data == "profile")
 async def menu_profile(callback: CallbackQuery):
-    """
-    Показывает профиль пользователя:
-    - дата регистрации в МСК
-    - статус премиума
-    Если пользователя нет в БД — создаём запись.
-    """
+    """Показывает профиль пользователя."""
+
     if not callback.from_user:
         await callback.answer()
         return
 
     now_moscow = datetime.now(ZoneInfo(settings.moscow_tz))
 
-    # Гарантированно получаем пользователя
+    # Получаем/создаём пользователя
     async with get_session() as session:
         user = await get_or_create_user(
             session=session,
