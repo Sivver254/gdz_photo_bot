@@ -1,17 +1,24 @@
 # app/handlers/admin.py
-from __future__ import annotations
-
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from aiogram import Router, F
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import Message, CallbackQuery
+from sqlalchemy import select
 
 from app.config import settings
 from app.db.models import User
-from app.db.session import async_session_maker
-from app.keyboards import inline_admin_panel_keyboard
+from app.db.session import get_session
+from app.keyboards import inline_admin_panel_keyboard, reply_main_keyboard
 
-router = Router(name="admin")
+router = Router()
+
+
+class AdminStates(StatesGroup):
+    waiting_user_id_give = State()
+    waiting_user_id_remove = State()
 
 
 def _is_admin(user_id: int) -> bool:
@@ -19,11 +26,8 @@ def _is_admin(user_id: int) -> bool:
 
 
 @router.message(F.text == "Админ-Панель💎")
-async def open_admin_panel(message: Message) -> None:
-    """Открытие админ-панели по кнопке на reply-клавиатуре."""
-    if not message.from_user:
-        return
-
+async def admin_panel_entry(message: Message):
+    """Открытие админ-панели по кнопке в reply-клавиатуре."""
     if not _is_admin(message.from_user.id):
         await message.answer("У вас нет доступа к админ-панели❗")
         return
@@ -35,118 +39,97 @@ async def open_admin_panel(message: Message) -> None:
 
 
 @router.callback_query(F.data == "admin_give_premium")
-async def admin_give_premium(callback: CallbackQuery) -> None:
-    if not callback.from_user:
-        return
-
+async def admin_give_premium(callback: CallbackQuery, state: FSMContext):
     if not _is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
-    await callback.message.answer("Введите User ID пользователя, которому выдать премиум:")
-    await callback.answer()
-
-
-@router.message(F.text.regexp(r"^\d+$"))
-async def process_admin_user_id(message: Message) -> None:
-    """
-    Очень простой вариант:
-    - если последнее сообщение в чате было 'Введите User ID…' и пишет админ —
-      считаем, что он сейчас вводит ID и выдаём/снимаем премиум через отдельные команды.
-    Чтобы не усложнять FSM, делаем две команды:
-    /give_premium <user_id>
-    /remove_premium <user_id>
-    Но по ТЗ у тебя отдельные кнопки, так что лучше отдельные хэндлеры ниже.
-    """
-    # НИЧЕГО не делаем здесь, чтобы не ломать обычные числа от юзеров.
-    # Админ команды делаем явно через callback'и ниже.
-    pass
-
-
-# === ВЫДАТЬ ПРЕМИУМ ПО CALLBACK С ВВОДОМ ID ===
-
-_pending_action: dict[int, str] = {}  # admin_id -> "give" / "remove"
-
-
-@router.callback_query(F.data == "admin_give_premium")
-async def cb_start_give_premium(callback: CallbackQuery) -> None:
-    if not callback.from_user:
-        return
-    admin_id = callback.from_user.id
-    if not _is_admin(admin_id):
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-
-    _pending_action[admin_id] = "give"
-    await callback.message.answer("Введите числовой User ID пользователя, которому выдать премиум:")
+    await state.set_state(AdminStates.waiting_user_id_give)
+    await callback.message.answer("Введите User ID пользователя, которому нужно выдать премиум:")
     await callback.answer()
 
 
 @router.callback_query(F.data == "admin_remove_premium")
-async def cb_start_remove_premium(callback: CallbackQuery) -> None:
-    if not callback.from_user:
-        return
-    admin_id = callback.from_user.id
-    if not _is_admin(admin_id):
+async def admin_remove_premium(callback: CallbackQuery, state: FSMContext):
+    if not _is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
 
-    _pending_action[admin_id] = "remove"
-    await callback.message.answer("Введите числовой User ID пользователя, у которого снять премиум:")
+    await state.set_state(AdminStates.waiting_user_id_remove)
+    await callback.message.answer("Введите User ID пользователя, у которого нужно снять премиум:")
     await callback.answer()
 
 
-@router.message(F.text.regexp(r"^\d+$"))
-async def cb_process_premium_change(message: Message) -> None:
-    """
-    Обрабатываем ввод числового user_id, если до этого админ нажал одну из кнопок.
-    """
-    if not message.from_user:
-        return
-    admin_id = message.from_user.id
-    if not _is_admin(admin_id):
-        return
-
-    action = _pending_action.get(admin_id)
-    if not action:
-        # Это просто число, не связанное с админ-действием
+@router.message(AdminStates.waiting_user_id_give)
+async def process_give_premium(message: Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
         return
 
     try:
-        target_tg_id = int(message.text)
-    except ValueError:
-        await message.answer("Нужно отправить именно числовой User ID.")
+        target_tg_id = int(message.text.strip())
+    except (TypeError, ValueError):
+        await message.answer("Нужно отправить только числовой User ID.")
         return
 
-    async with async_session_maker() as session:
-        result = await session.execute(
-            User.__table__.select().where(User.telegram_user_id == target_tg_id)
-        )
-        row = result.first()
+    async with await get_session() as session:
+        stmt = select(User).where(User.telegram_user_id == target_tg_id)
+        result = await session.execute(stmt)
+        user = result.scalar_one_or_none()
 
-        if not row:
+        if not user:
             await message.answer(
-                "Проблема с пользователем: он не зарегистрирован в боте или произошла ошибка. "
-                "Попроси его сначала написать боту /start❌"
+                "Проблема с выдачей премиума: пользователь не найден в БД. "
+                "Возможно, он ещё не запускал бота❌"
             )
-            _pending_action.pop(admin_id, None)
-            return
-
-        user = User(**row._mapping)
-
-        if action == "give":
-            user.is_premium = True
-            user.premium_since = datetime.now(settings.tz)
-            await session.merge(user)
-            await session.commit()
+        else:
+            if not user.is_premium:
+                user.is_premium = True
+                user.premium_since = datetime.now(ZoneInfo(settings.moscow_tz))
+                await session.commit()
+            username_display = f"@{user.username}" if user.username else str(user.telegram_user_id)
             await message.answer(
-                f"Успешно выдан премиум пользователю с ID {target_tg_id}✅"
+                f"Успешно выдан премиум пользователю: {username_display}✅"
             )
-        elif action == "remove":
+
+    await state.clear()
+    await message.answer(
+        "Возвращаю обычную клавиатуру.",
+        reply_markup=reply_main_keyboard(is_admin=True),
+    )
+
+
+@router.message(AdminStates.waiting_user_id_remove)
+async def process_remove_premium(message: Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        return
+
+    try:
+        target_tg_id = int(message.text.strip())
+    except (TypeError, ValueError):
+        await message.answer("Нужно отправить только числовой User ID.")
+        return
+
+    async with await get_session() as session:
+        stmt = select(User).where(User.telegram_user_id == target_tg_id)
+        result = await session.execute(stmt)
+        user = result.scalar_one_or_none()
+
+        if not user or not user.is_premium:
+            await message.answer(
+                "Снятие не завершено. Возможно, пользователь не был зарегистрирован "
+                "в боте или у него не было премиума. Повторите попытку❌"
+            )
+        else:
             user.is_premium = False
             user.premium_since = None
-            await session.merge(user)
             await session.commit()
-            await message.answer("Снятие премиума было успешно закончено✅")
+            username_display = f"@{user.username}" if user.username else str(user.telegram_user_id)
+            await message.answer(
+                f"Снятие премиума было успешно закончено✅\nПользователь: {username_display}"
+            )
 
-    _pending_action.pop(admin_id, None)
+    await state.clear()
+    await message.answer(
+        "Возвращаю обычную клавиатуру.",
+        reply_markup=reply_main_keyboard(is_admin=True),
+    )
