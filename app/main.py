@@ -1,5 +1,4 @@
 # app/main.py
-import asyncio
 import os
 
 from aiohttp import web
@@ -17,6 +16,7 @@ from app.handlers import start, menu, photo, profile, admin
 
 
 async def on_startup(app: web.Application):
+    # создаём таблицы в БД
     await init_db()
 
     bot: Bot = app["bot"]
@@ -45,7 +45,7 @@ async def healthcheck(request: web.Request) -> web.Response:
     return web.Response(text="OK")
 
 
-async def main():
+def main():
     bot = Bot(
         token=settings.bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -62,6 +62,7 @@ async def main():
     app["bot"] = bot
     app["dispatcher"] = dp
 
+    # регистрируем обработчик webhook'а
     SimpleRequestHandler(
         dispatcher=dp,
         bot=bot,
@@ -70,10 +71,13 @@ async def main():
         path=settings.webhook_path,
     )
 
+    # healthcheck
     app.router.add_get("/", healthcheck)
 
+    # интеграция aiogram + aiohttp
     setup_application(app, dp, bot=bot)
 
+    # хуки старта/остановки
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
 
@@ -82,4 +86,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
